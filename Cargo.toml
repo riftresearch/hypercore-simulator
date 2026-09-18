@@ -1,0 +1,35 @@
+[package]
+name = "hypercore-simulator"
+version = "0.1.0"
+edition = "2024"
+description = "Evidence-driven simulator of the Hyperliquid spot HTTP API"
+repository = "https://github.com/riftresearch/hypercore-simulator"
+
+[workspace]
+# A parity evidence checkout under captures/ carries provenance copies of this
+# manifest; keep cargo from treating them as packages.
+exclude = ["captures"]
+
+[features]
+default = ["cli"]
+# The clap-derived command line. Library users can opt out and build `Args` directly.
+cli = ["dep:clap"]
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["raw_value"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+hex = "0.4"
+sha3 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+rmp-serde = "1.3"
+futures-util = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
+
+[[bin]]
+name = "hypercore-simulator"
+path = "src/bin/main.rs"
+required-features = ["cli"]

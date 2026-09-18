@@ -1,0 +1,10 @@
+/target
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+
+# Parity evidence lives in riftresearch/hypercore-simulator-captures; `just parity` clones it here.
+/captures/
