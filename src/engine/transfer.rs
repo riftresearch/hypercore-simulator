@@ -1,15 +1,38 @@
-//! Spot sends between accounts, plus the `/_test/fund` control that seeds them.
+//! Spot sends between accounts, spot withdrawals to external EVM chains, plus
+//! the `/_test/fund` control that seeds accounts.
 
 use super::account::{Delta, Draft, LedgerEntry, TokenIndex};
 use super::{Balances, Engine, tx_hash};
 use crate::{
     decimal::{self, ONE, ZERO, add, div, mul, parse_scientific, sub},
     error::Result,
-    wire::{Address, Funding, FundingMode, SendAsset, TxHash},
+    wire::{Address, Funding, FundingMode, SendAsset, SendToEvmWithData, TxHash},
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::{iter, sync::Arc};
+
+/// HyperCore's USDC system address, the ledger destination of a withdrawal.
+pub const USDC_SYSTEM_ADDRESS: Address = Address([
+    0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]);
+/// HyperEVM gas for the 200k-gas withdrawal call, as measured on mainnet on
+/// 2026-09-20: charged in HYPE when held, otherwise in USDC.
+pub const EVM_SEND_GAS_HYPE: Decimal = Decimal::from_parts(2101, 0, 0, false, 8);
+pub const EVM_SEND_GAS_USDC: Decimal = Decimal::from_parts(1822, 0, 0, false, 6);
+
+/// One spot withdrawal to an external EVM chain, as `/_test/evm_sends` reports it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmSend {
+    pub from: Address,
+    pub destination: Address,
+    pub destination_chain_id: u32,
+    #[serde(with = "decimal::text")]
+    pub amount: Decimal,
+    pub nonce: u64,
+    pub time: u64,
+}
 
 pub(super) struct Transfer {
     pub sender: Address,
@@ -61,6 +84,112 @@ impl Engine {
             quantity,
         };
         self.transfer(transfer, nonce, now_ms, tx_hash(raw, nonce))
+    }
+
+    pub(super) fn send_to_evm(
+        &mut self,
+        action: &SendToEvmWithData,
+        signer: Address,
+        nonce: u64,
+        now_ms: u64,
+        raw: &[u8],
+    ) -> Result<()> {
+        if action.source_dex != "spot" {
+            return Err("Simulator: only spot withdrawals to EVM are supported".into());
+        }
+        if action.address_encoding != "hex" {
+            return Err("Simulator: only hex address encoding is supported".into());
+        }
+        if action.data != "0x" {
+            return Err("Simulator: custom hook data is unsupported".into());
+        }
+        let destination = Address::parse(&action.destination_recipient)?;
+        let token = self
+            .token_by_name(&action.token, true)
+            .map_err(|_| format!("Unknown token {}", action.token))?;
+        if token.index != self.usdc {
+            return Err("Simulator: only USDC withdraws to EVM".into());
+        }
+        let quantity = parse_scientific(&action.amount)?;
+        if quantity == ZERO {
+            return Err("Send amount cannot be zero".into());
+        }
+        if quantity < ZERO || quantity.normalize().scale() > token.wei_decimals {
+            return Err("Invalid number of decimals".into());
+        }
+        let usdc = self.usdc;
+        let source = self
+            .accounts
+            .get(&signer)
+            .ok_or("Simulator: sender does not exist")?;
+        if source.available(usdc) < quantity {
+            return Err("Insufficient balance for token transfer".into());
+        }
+        let hype = self
+            .tokens
+            .values()
+            .find(|token| &*token.name == "HYPE")
+            .map(|token| token.index);
+        let (fee_token, fee, native_token_fee) = match hype {
+            Some(hype) if source.available(hype) >= EVM_SEND_GAS_HYPE => {
+                (hype, ZERO, EVM_SEND_GAS_HYPE)
+            }
+            _ if source.available(usdc) - quantity >= EVM_SEND_GAS_USDC => {
+                (usdc, EVM_SEND_GAS_USDC, ZERO)
+            }
+            _ => return Err("Insufficient USDC or HYPE balance for token transfer gas.".into()),
+        };
+        let mut debit = Draft::new(Some(source), [usdc, fee_token]);
+        debit.credit(usdc, -quantity)?;
+        debit.credit(
+            fee_token,
+            -(if fee_token == usdc {
+                fee
+            } else {
+                native_token_fee
+            }),
+        )?;
+        if fee_token != usdc {
+            let prior = source
+                .balances
+                .get(&fee_token)
+                .ok_or("Simulator: missing gas balance")?;
+            let remaining = debit.balance(fee_token);
+            remaining.entry =
+                div(mul(prior.entry, remaining.total)?, prior.total)?.trunc_with_scale(8);
+        }
+        let entry = LedgerEntry {
+            time: now_ms,
+            hash: tx_hash(raw, nonce),
+            delta: Delta::Send {
+                user: signer,
+                destination: USDC_SYSTEM_ADDRESS,
+                source_dex: "spot",
+                destination_dex: "spot",
+                token: token.name.clone(),
+                amount: quantity,
+                usdc_value: quantity,
+                fee,
+                native_token_fee,
+                nonce,
+                fee_token: Arc::from(if fee == ZERO { "" } else { "USDC" }),
+            },
+        };
+        let account = self
+            .accounts
+            .get_mut(&signer)
+            .ok_or("Simulator: sender does not exist")?;
+        debit.commit(account);
+        account.ledger.push(entry);
+        self.evm_sends.push(EvmSend {
+            from: signer,
+            destination,
+            destination_chain_id: action.destination_chain_id,
+            amount: quantity,
+            nonce,
+            time: now_ms,
+        });
+        Ok(())
     }
 
     /// Move `quantity` and charge the activation gas that a fresh recipient incurs.
@@ -156,7 +285,7 @@ impl Engine {
                 amount: quantity,
                 usdc_value: valuation.trunc_with_scale(6),
                 fee,
-                native_token_fee: "0.0",
+                native_token_fee: ZERO,
                 nonce,
                 fee_token: fee_name,
             },
@@ -232,7 +361,7 @@ impl Engine {
                             amount: quantity,
                             usdc_value: self.usdc_value(token, quantity)?.trunc_with_scale(6),
                             fee,
-                            native_token_fee: "0.0",
+                            native_token_fee: ZERO,
                             nonce: now_ms,
                             fee_token: Arc::from(if fee == ZERO { "" } else { "USDC" }),
                         },

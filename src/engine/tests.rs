@@ -895,3 +895,159 @@ fn fills_by_time_are_inclusive_and_oldest_first() {
         .is_err()
     );
 }
+
+const T0: u64 = 1_789_883_000_000;
+const CANONICAL_USDC_ONLY: &str = r#"{"tokens":[{"index":0,"name":"USDC","tokenId":"0x1","szDecimals":8,"weiDecimals":8,"isCanonical":true}],"universe":[]}"#;
+
+fn send_to_evm(amount: &str, nonce: u64) -> Value {
+    json!({
+        "action": {
+            "type": "sendToEvmWithData",
+            "hyperliquidChain": "Mainnet",
+            "signatureChainId": "0x66eee",
+            "token": "USDC",
+            "amount": amount,
+            "sourceDex": "spot",
+            "destinationRecipient": "0x33f65788aca48d733c2c2444ac9f79b18206aa92",
+            "addressEncoding": "hex",
+            "destinationChainId": 3,
+            "gasLimit": 200000,
+            "data": "0x",
+            "nonce": nonce,
+        },
+        "nonce": nonce,
+    })
+}
+
+fn evm_sends(engine: &mut Engine, now: u64) -> Value {
+    control(engine, Control::EvmSends, &json!({}), now).unwrap()
+}
+
+#[test]
+fn an_evm_withdrawal_without_hype_pays_gas_in_usdc_on_top_of_the_amount() {
+    let mut engine = Engine::new(CANONICAL_USDC_ONLY).unwrap();
+    let sender = "0x31f3e6455222c5f2056bdd6007c80d00e6ae532b";
+    fund(
+        &mut engine,
+        json!({"address":sender,"token":"USDC","amount":"2","mode":"transfer"}),
+        T0,
+    )
+    .unwrap();
+
+    let refused = exchange(
+        &mut engine,
+        send_to_evm("2", 1_789_883_381_543),
+        sender,
+        T0 + 1,
+    );
+    assert_eq!(
+        refused,
+        json!({"status":"err","response":"Insufficient USDC or HYPE balance for token transfer gas."})
+    );
+    assert_eq!(evm_sends(&mut engine, T0 + 1), json!([]));
+
+    let sent = exchange(
+        &mut engine,
+        send_to_evm("1.9", 1_789_883_399_641),
+        sender,
+        T0 + 2,
+    );
+    assert_eq!(sent, json!({"status":"ok","response":{"type":"default"}}));
+    let state = account(&mut engine, sender, T0 + 2);
+    assert_eq!(state["state"]["balances"][0]["total"], "0.098178");
+    let ledger = state["ledger"].as_array().unwrap();
+    let delta = &ledger.last().unwrap()["delta"];
+    assert_eq!(delta["type"], "send");
+    assert_eq!(
+        delta["destination"],
+        "0x2000000000000000000000000000000000000000"
+    );
+    assert_eq!(delta["amount"], "1.9");
+    assert_eq!(delta["fee"], "0.001822");
+    assert_eq!(delta["feeToken"], "USDC");
+    assert_eq!(delta["nativeTokenFee"], "0.0");
+    assert_eq!(delta["nonce"], 1_789_883_399_641_u64);
+    assert_eq!(
+        evm_sends(&mut engine, T0 + 2),
+        json!([{
+            "from": sender,
+            "destination": "0x33f65788aca48d733c2c2444ac9f79b18206aa92",
+            "destinationChainId": 3,
+            "amount": "1.9",
+            "nonce": 1_789_883_399_641_u64,
+            "time": T0 + 2,
+        }])
+    );
+    let duplicate = exchange(
+        &mut engine,
+        send_to_evm("0.05", 1_789_883_399_641),
+        sender,
+        T0 + 3,
+    );
+    assert_eq!(
+        duplicate["response"],
+        "Invalid nonce: duplicate nonce 1789883399641"
+    );
+}
+
+#[test]
+fn an_evm_withdrawal_pays_gas_in_hype_when_the_account_holds_it() {
+    let mut engine = Engine::new(MAINNET_SPOT_META).unwrap();
+    let sender = "0x33f65788aca48d733c2c2444ac9f79b18206aa92";
+    for (token, amount) in [("USDC", "5"), ("HYPE", "0.001")] {
+        fund(
+            &mut engine,
+            json!({"address":sender,"token":token,"amount":amount,"mode":"transfer"}),
+            T0,
+        )
+        .unwrap();
+    }
+    let sent = exchange(
+        &mut engine,
+        send_to_evm("5", 1_789_882_564_807),
+        sender,
+        T0 + 1,
+    );
+    assert_eq!(sent, json!({"status":"ok","response":{"type":"default"}}));
+    let state = account(&mut engine, sender, T0 + 1);
+    let balances = state["state"]["balances"].as_array().unwrap();
+    let total = |coin: &str| {
+        balances
+            .iter()
+            .find(|row| row["coin"] == coin)
+            .map(|row| row["total"].clone())
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(total("USDC"), "0.0");
+    assert_eq!(total("HYPE"), "0.00097899");
+    let delta = &state["ledger"].as_array().unwrap().last().unwrap()["delta"];
+    assert_eq!(delta["fee"], "0.0");
+    assert_eq!(delta["feeToken"], "");
+    assert_eq!(delta["nativeTokenFee"], "0.00002101");
+
+    let unsupported = exchange(
+        &mut engine,
+        json!({
+            "action": {
+                "type": "sendToEvmWithData",
+                "hyperliquidChain": "Mainnet",
+                "signatureChainId": "0x66eee",
+                "token": "HYPE",
+                "amount": "0.0001",
+                "sourceDex": "spot",
+                "destinationRecipient": "0x33f65788aca48d733c2c2444ac9f79b18206aa92",
+                "addressEncoding": "hex",
+                "destinationChainId": 3,
+                "gasLimit": 200000,
+                "data": "0x",
+                "nonce": 1_789_882_564_808_u64,
+            },
+            "nonce": 1_789_882_564_808_u64,
+        }),
+        sender,
+        T0 + 2,
+    );
+    assert_eq!(unsupported["status"], "err");
+    control(&mut engine, Control::Reset, &json!({}), T0 + 3).unwrap();
+    assert_eq!(evm_sends(&mut engine, T0 + 3), json!([]));
+}

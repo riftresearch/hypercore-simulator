@@ -265,7 +265,8 @@ pub enum Delta {
         usdc_value: Decimal,
         #[serde(with = "decimal::text")]
         fee: Decimal,
-        native_token_fee: &'static str,
+        #[serde(with = "decimal::text")]
+        native_token_fee: Decimal,
         nonce: u64,
         fee_token: Arc<str>,
     },

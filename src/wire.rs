@@ -422,6 +422,19 @@ pub enum Action {
     ScheduleCancel(ScheduleCancelAction),
     #[serde(rename = "sendAsset")]
     SendAsset(SendAsset),
+    #[serde(rename = "sendToEvmWithData")]
+    SendToEvmWithData(SendToEvmWithData),
+}
+
+impl Action {
+    /// The nonce a user-signed action carries inside its signed payload.
+    pub fn user_signed_nonce(&self) -> Option<u64> {
+        match self {
+            Self::SendAsset(action) => Some(action.nonce),
+            Self::SendToEvmWithData(action) => Some(action.nonce),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -576,6 +589,24 @@ pub struct SendAsset {
     pub nonce: u64,
 }
 
+/// User-signed spot withdrawal to an external EVM chain through HyperEVM.
+/// String fields keep their exact text for EIP-712 hashing, as `SendAsset` does.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SendToEvmWithData {
+    pub hyperliquid_chain: Chain,
+    pub signature_chain_id: Word,
+    pub token: String,
+    pub amount: String,
+    pub source_dex: String,
+    pub destination_recipient: String,
+    pub address_encoding: String,
+    pub destination_chain_id: u32,
+    pub gas_limit: u64,
+    pub data: String,
+    pub nonce: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub enum Chain {
     Mainnet,
@@ -605,6 +636,7 @@ pub enum Control {
     Dust(DustConfig),
     Fund(Funding),
     Book(BookSpec),
+    EvmSends,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

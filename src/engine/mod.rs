@@ -29,6 +29,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
+pub use transfer::EvmSend;
 use transfer::FundReply;
 
 /// Captured `spotMeta` documents bundled as each network's default metadata;
@@ -101,6 +102,9 @@ pub struct Engine {
     default_fees: FeeState,
     next_oid: u64,
     next_tid: u64,
+    /// Spot withdrawals to external EVM chains, in submission order, for the
+    /// `/_test/evm_sends` control that a bridge mock drains.
+    evm_sends: Vec<EvmSend>,
 }
 
 impl Engine {
@@ -171,6 +175,7 @@ impl Engine {
             fees,
             next_oid: 1,
             next_tid: 1,
+            evm_sends: Vec::new(),
         };
         engine.quote_tokens = engine.default_quote_tokens();
         Ok(engine)
@@ -195,6 +200,7 @@ impl Engine {
         self.upgrade_post_only = false;
         self.next_oid = 1;
         self.next_tid = 1;
+        self.evm_sends.clear();
         self.fees = self.default_fees.clone();
         self.quote_tokens = self.default_quote_tokens();
         self.aligned_quote_tokens.clear();
@@ -458,17 +464,17 @@ impl Engine {
         if envelope.vault_address.is_some() {
             return Err("Vault may not perform this action.".into());
         }
-        if let Action::SendAsset(action) = &envelope.action {
+        if let Some(nonce) = envelope.action.user_signed_nonce() {
             if envelope.expires_after.is_some() {
                 return Err("Action does not support expires_after".into());
             }
-            if action.nonce != envelope.nonce {
+            if nonce != envelope.nonce {
                 return Err("Nonce mismatch.".into());
             }
         }
         if !self.accounts.contains_key(&signer) {
             return Err(match envelope.action {
-                Action::SendAsset(_) => {
+                Action::SendAsset(_) | Action::SendToEvmWithData(_) => {
                     format!("Must deposit before performing actions. User: {signer}")
                 }
                 _ => format!("User or API Wallet {signer} does not exist."),
@@ -513,6 +519,10 @@ impl Engine {
             }
             Action::SendAsset(action) => {
                 self.send_asset(action, signer, envelope.nonce, now_ms, raw)?;
+                ExchangeOk::Default
+            }
+            Action::SendToEvmWithData(action) => {
+                self.send_to_evm(action, signer, envelope.nonce, now_ms, raw)?;
                 ExchangeOk::Default
             }
         })
@@ -638,6 +648,7 @@ impl Engine {
                 ControlReply::Ok { ok: true }
             }
             Control::Dust(config) => ControlReply::Dust(self.configure_dust(&config)?),
+            Control::EvmSends => ControlReply::EvmSends(&self.evm_sends),
             Control::Fund(funding) => ControlReply::Fund(self.fund(&funding, raw, now_ms)?),
             Control::Book(spec) => ControlReply::Book(self.set_book(&spec, now_ms)?),
             Control::Time(_) | Control::Fault(_) => {
@@ -784,6 +795,7 @@ pub enum ControlReply<'a> {
     Dust(DustReply),
     Fund(FundReply<'a>),
     Book(L2Book<'a>),
+    EvmSends(&'a [EvmSend]),
 }
 
 #[derive(Serialize)]

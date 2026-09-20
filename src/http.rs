@@ -4,7 +4,7 @@
 use crate::{
     actor::{Actor, Admission, Request, exchange_error, text},
     crypto,
-    wire::{Action, Control, Envelope, InfoRequest, Object},
+    wire::{Control, Envelope, InfoRequest, Object},
 };
 use axum::{
     Router,
@@ -111,8 +111,10 @@ async fn exchange(
         Ok(Object(envelope)) => envelope,
         Err(error) => return error.upstream(),
     };
-    if let Action::SendAsset(action) = &envelope.action
-        && action.nonce != envelope.nonce
+    if envelope
+        .action
+        .user_signed_nonce()
+        .is_some_and(|nonce| nonce != envelope.nonce)
     {
         return exchange_error("Nonce mismatch.");
     }
@@ -155,6 +157,7 @@ async fn control(
         "dust" => parse(&headers, &bytes, Control::Dust),
         "fund" => parse(&headers, &bytes, Control::Fund),
         "book" => parse(&headers, &bytes, Control::Book),
+        "evm_sends" => parse(&headers, &bytes, |_: IgnoredAny| Control::EvmSends),
         _ => return text(400, "Simulator: unknown control endpoint"),
     };
     match control {
