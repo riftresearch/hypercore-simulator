@@ -320,6 +320,27 @@ fn bundled_metadata_loads_for_both_networks() {
 }
 
 #[test]
+fn a_spot_only_account_has_an_empty_perp_state_at_the_simulator_clock() {
+    let engine = Engine::new(NQ_MARKET).unwrap();
+    let empty = json!({"accountValue":"0.0","totalNtlPos":"0.0","totalRawUsd":"0.0","totalMarginUsed":"0.0"});
+    assert_eq!(
+        info(
+            &engine,
+            json!({"type":"clearinghouseState","user":MAKER}),
+            1_793_735_832_899
+        ),
+        json!({
+            "marginSummary": empty,
+            "crossMarginSummary": empty,
+            "crossMaintenanceMarginUsed": "0.0",
+            "withdrawable": "0.0",
+            "assetPositions": [],
+            "time": 1_793_735_832_899_u64,
+        })
+    );
+}
+
+#[test]
 fn spot_meta_is_echoed_verbatim() {
     let engine = Engine::new(NQ_MARKET).unwrap();
     let reply = engine.info(&Info::SpotMeta, 1).unwrap();

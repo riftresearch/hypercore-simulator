@@ -244,6 +244,8 @@ pub enum Info {
     },
     #[serde(rename = "spotClearinghouseState")]
     ClearinghouseState { user: Address },
+    #[serde(rename = "clearinghouseState")]
+    PerpClearinghouseState { user: Address },
     /// The object form never reads `source`; only the positional form carries it.
     #[serde(rename = "preTransferCheck")]
     PreTransferCheck {

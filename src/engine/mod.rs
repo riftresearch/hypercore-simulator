@@ -304,6 +304,14 @@ impl Engine {
                 }
             }
             Info::ClearinghouseState { user } => InfoReply::Balances(self.balances(account(user))),
+            Info::PerpClearinghouseState { .. } => InfoReply::PerpState(PerpState {
+                margin_summary: NO_MARGIN,
+                cross_margin_summary: NO_MARGIN,
+                cross_maintenance_margin_used: "0.0",
+                withdrawable: "0.0",
+                asset_positions: [],
+                time: now_ms,
+            }),
             Info::PreTransferCheck { user, source } => {
                 let account = account(user);
                 InfoReply::PreTransfer {
@@ -703,6 +711,33 @@ pub struct Balances<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PerpState {
+    margin_summary: MarginSummary,
+    cross_margin_summary: MarginSummary,
+    cross_maintenance_margin_used: &'static str,
+    withdrawable: &'static str,
+    asset_positions: [(); 0],
+    time: u64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarginSummary {
+    account_value: &'static str,
+    total_ntl_pos: &'static str,
+    total_raw_usd: &'static str,
+    total_margin_used: &'static str,
+}
+
+const NO_MARGIN: MarginSummary = MarginSummary {
+    account_value: "0.0",
+    total_ntl_pos: "0.0",
+    total_raw_usd: "0.0",
+    total_margin_used: "0.0",
+};
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BalanceRow<'a> {
     coin: &'a str,
     token: TokenIndex,
@@ -732,6 +767,7 @@ pub enum InfoReply<'a> {
     Meta(&'a RawValue),
     Book(Option<L2Book<'a>>),
     Balances(Balances<'a>),
+    PerpState(PerpState),
     #[serde(rename_all = "camelCase")]
     PreTransfer {
         is_sanctioned: bool,

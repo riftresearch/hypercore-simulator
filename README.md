@@ -10,7 +10,7 @@ The simulator serves `POST /info` and `POST /exchange` with the same request sha
 
 | Surface | Supported |
 | --- | --- |
-| `/info` | `spotMeta`, `l2Book` (with `nSigFigs`/`mantissa` aggregation), `spotClearinghouseState`, `preTransferCheck`, `userRole`, `userFees`, `orderStatus`, `openOrders`, `frontendOpenOrders`, `historicalOrders`, `userFills` and `userFillsByTime` (with `aggregateByTime`), `userNonFundingLedgerUpdates` |
+| `/info` | `spotMeta`, `l2Book` (with `nSigFigs`/`mantissa` aggregation), `spotClearinghouseState`, `clearinghouseState` (an empty perp state at the simulator clock), `preTransferCheck`, `userRole`, `userFees`, `orderStatus`, `openOrders`, `frontendOpenOrders`, `historicalOrders`, `userFills` and `userFillsByTime` (with `aggregateByTime`), `userNonFundingLedgerUpdates` |
 | `/exchange` | `order` (spot limit `Ioc`, `Gtc`, `Alo` and stop/take-profit triggers), `cancel`, `cancelByCloid`, `modify`, `batchModify`, `scheduleCancel`, and `sendAsset` (spot to spot), with real EIP-712 / MessagePack signature recovery compatible with the official Python SDK |
 | Accounting | balances and holds, USD cost basis, activation fees for fresh accounts, taker and maker fees with VIP tiers and rolling volume, nonce windows and replay protection, automatic dust conversion |
 | Matching | price-time priority per market; users' resting orders and injected synthetic depth share the book, so accounts can build a real book with `Gtc`/`Alo` orders and trade against each other with maker and taker fills |
