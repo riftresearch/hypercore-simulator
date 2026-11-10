@@ -16,10 +16,8 @@ use std::{iter, sync::Arc};
 pub const USDC_SYSTEM_ADDRESS: Address = Address([
     0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]);
-/// HyperEVM gas for the 200k-gas withdrawal call, as measured on mainnet on
-/// 2026-09-20: charged in HYPE when held, otherwise in USDC.
-pub const EVM_SEND_GAS_HYPE: Decimal = Decimal::from_parts(2101, 0, 0, false, 8);
-pub const EVM_SEND_GAS_USDC: Decimal = Decimal::from_parts(1822, 0, 0, false, 6);
+const WEI_SCALE: u32 = 18;
+const EVM_GAS_USDC_DECIMALS: u32 = 6;
 
 /// One spot withdrawal to an external EVM chain, as `/_test/evm_sends` reports it.
 #[derive(Clone, Debug, Serialize)]
@@ -129,16 +127,27 @@ impl Engine {
             .tokens
             .values()
             .find(|token| &*token.name == "HYPE")
-            .map(|token| token.index);
-        let (fee_token, fee, native_token_fee) = match hype {
-            Some(hype) if source.available(hype) >= EVM_SEND_GAS_HYPE => {
-                (hype, ZERO, EVM_SEND_GAS_HYPE)
-            }
-            _ if source.available(usdc) - quantity >= EVM_SEND_GAS_USDC => {
-                (usdc, EVM_SEND_GAS_USDC, ZERO)
-            }
-            _ => return Err("Insufficient USDC or HYPE balance for token transfer gas.".into()),
-        };
+            .ok_or("Simulator: EVM gas is priced in HYPE, which the metadata lacks")?;
+        let gas = i128::from(action.gas_limit)
+            .checked_mul(i128::from(self.evm_base_fee))
+            .and_then(|wei| Decimal::try_from_i128_with_scale(wei, WEI_SCALE).ok())
+            .ok_or("Simulator: EVM gas out of range")?;
+        let native_gas = gas.trunc_with_scale(hype.wei_decimals);
+        let (fee_token, fee, native_token_fee) =
+            if native_gas > ZERO && source.available(hype.index) >= native_gas {
+                (hype.index, ZERO, native_gas)
+            } else {
+                let price = self
+                    .usdc_pairs
+                    .get(&hype.index)
+                    .map_or(Ok(None), |pair| self.reference_price(*pair))?
+                    .ok_or("Simulator: no HYPE/USDC price to charge EVM gas in USDC")?;
+                let fee = mul(gas, price)?.trunc_with_scale(EVM_GAS_USDC_DECIMALS);
+                if source.available(usdc) - quantity < fee {
+                    return Err("Insufficient USDC or HYPE balance for token transfer gas.".into());
+                }
+                (usdc, fee, ZERO)
+            };
         let mut debit = Draft::new(Some(source), [usdc, fee_token]);
         debit.credit(usdc, -quantity)?;
         debit.credit(

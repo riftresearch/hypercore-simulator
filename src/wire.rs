@@ -639,6 +639,7 @@ pub enum Control {
     Fund(Funding),
     Book(BookSpec),
     EvmSends,
+    EvmGas(EvmGas),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -674,6 +675,20 @@ pub enum FaultKind {
 pub struct Upgrade {
     #[serde(default)]
     pub post_only: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmGas {
+    #[serde(default)]
+    pub base_fee_per_gas: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct EvmCall {
+    #[serde(default)]
+    pub id: Value,
+    pub method: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

@@ -39,6 +39,8 @@ pub const TESTNET_SPOT_META: &str = include_str!("../../bundled/spotMeta-testnet
 
 const FEES: &str = include_str!("../../bundled/userFees-testnet.json");
 
+pub const DEFAULT_EVM_BASE_FEE: u64 = 100_000_000;
+
 pub struct Token {
     pub index: TokenIndex,
     pub name: Arc<str>,
@@ -105,6 +107,7 @@ pub struct Engine {
     /// Spot withdrawals to external EVM chains, in submission order, for the
     /// `/_test/evm_sends` control that a bridge mock drains.
     evm_sends: Vec<EvmSend>,
+    evm_base_fee: u64,
 }
 
 impl Engine {
@@ -176,6 +179,7 @@ impl Engine {
             next_oid: 1,
             next_tid: 1,
             evm_sends: Vec::new(),
+            evm_base_fee: DEFAULT_EVM_BASE_FEE,
         };
         engine.quote_tokens = engine.default_quote_tokens();
         Ok(engine)
@@ -201,9 +205,14 @@ impl Engine {
         self.next_oid = 1;
         self.next_tid = 1;
         self.evm_sends.clear();
+        self.evm_base_fee = DEFAULT_EVM_BASE_FEE;
         self.fees = self.default_fees.clone();
         self.quote_tokens = self.default_quote_tokens();
         self.aligned_quote_tokens.clear();
+    }
+
+    pub fn evm_base_fee(&self) -> u64 {
+        self.evm_base_fee
     }
 
     fn token(&self, index: TokenIndex) -> &Token {
@@ -657,6 +666,17 @@ impl Engine {
             }
             Control::Dust(config) => ControlReply::Dust(self.configure_dust(&config)?),
             Control::EvmSends => ControlReply::EvmSends(&self.evm_sends),
+            Control::EvmGas(gas) => {
+                if let Some(base_fee) = gas.base_fee_per_gas {
+                    if base_fee == 0 {
+                        return Err("Simulator: baseFeePerGas must be positive".into());
+                    }
+                    self.evm_base_fee = base_fee;
+                }
+                ControlReply::EvmGas {
+                    base_fee_per_gas: self.evm_base_fee,
+                }
+            }
             Control::Fund(funding) => ControlReply::Fund(self.fund(&funding, raw, now_ms)?),
             Control::Book(spec) => ControlReply::Book(self.set_book(&spec, now_ms)?),
             Control::Time(_) | Control::Fault(_) => {
@@ -832,6 +852,10 @@ pub enum ControlReply<'a> {
     Fund(FundReply<'a>),
     Book(L2Book<'a>),
     EvmSends(&'a [EvmSend]),
+    #[serde(rename_all = "camelCase")]
+    EvmGas {
+        base_fee_per_gas: u64,
+    },
 }
 
 #[derive(Serialize)]

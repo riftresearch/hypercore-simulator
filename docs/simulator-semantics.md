@@ -115,6 +115,14 @@ Both parties receive identical positive `delta.type:"send"` entries. `feeToken` 
 
 Captured action errors used verbatim: `Invalid nonce: duplicate nonce {nonce}`, `Invalid nonce: nonce too low {nonce} < {oldest}`, `Invalid nonce: nonce too high {nonce} > {newest}`, `Must deposit before performing actions. User: {signer}` for a nonexistent recovered `sendAsset` signer, `Insufficient balance for token transfer`, `Unknown token {token}`, `Invalid perp DEX`, `Invalid decimal number`, `Send amount cannot be zero`, and `Invalid number of decimals` for a negative amount. Dynamic values come from submitted/recovered data and the simulator clock.
 
+### `sendToEvmWithData`
+
+Withdraws spot USDC to an EVM chain: `sourceDex:"spot"`, `addressEncoding:"hex"` and `data:"0x"` only. The sender's ledger gains a `send` to `0x2000000000000000000000000000000000000000` and `/_test/evm_sends` lists the withdrawal.
+
+Gas is `gasLimit × base fee` in HYPE, at the HyperEVM small-block base fee that `/evm` reports through `eth_gasPrice` and `/_test/evm_gas` sets (default 0.1 gwei, HyperEVM's floor). An account holding at least that much HYPE pays it in HYPE (`nativeTokenFee`); otherwise it pays in USDC on top of the amount, at the HYPE/USDC reference price (mark, else mid), and is refused with `Insufficient USDC or HYPE balance for token transfer gas.` when the USDC left after the amount does not cover it. Without a HYPE/USDC price the USDC charge is the simulator error `Simulator: no HYPE/USDC price to charge EVM gas in USDC`, and metadata without a HYPE token refuses every withdrawal with `Simulator: EVM gas is priced in HYPE, which the metadata lacks`.
+
+Evidence is mainnet, not testnet: a 3706.913329 USDC withdrawal on 2026-11-10 at 14:58:51 UTC was charged `fee:"0.001468"` USDC while the small-block base fee was 0.1000 gwei and HYPE traded at 73.416, exactly 200,000 × 0.1 gwei × 73.416 truncated to six decimals; [Hyperliquid's transfer docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm/hypercore-less-than-greater-than-hyperevm-transfers) state the same 200k gas at the next block's base fee. Three withdrawals at 15:42 UTC, each leaving 0.02000058 USDC beside 69,327.466035 USDC, were refused while the small-block base fee was 4.8 to 6.8 gwei. The six-decimal USDC truncation fits the one sample; the HYPE charge truncated to HYPE's `weiDecimals`, charging `gasLimit` rather than a fixed 200k, and the reference price used are simulator policy.
+
 ### Fees and rolling volume
 
 Stable quote-to-quote pairs receive fee weight0.2. Explicit **AQAv1** alignment multiplies fees by0.8 and qualifying volume by1.2; it is not the newer AQAv2 designation, which carries no such benefits. Quote registration/alignment is external context, not a symbol-name heuristic; `/_test/fees` supplies these sets. Stable weighting is measured; AQAv1 benefits follow the official policy and controlled fixtures, not a live alignment-boundary experiment.
@@ -208,6 +216,14 @@ The two original minimum-funded IOC envelopes returned this exact error, and the
 ### `POST /_test/dust`
 
 `{"intervalMs":60000,"maxNotional":null}` overrides the positive sweep interval and per-account eligibility cap. A nonnegative decimal-string cap constrains eligible notional; `null` explicitly removes it. `{}` reports current `intervalMs`, `maxNotional` and `maxNotionalSource` (`override`, `hip1`, or `testnet-unmeasured`). This configures automatic processing; it is not a signed manual sweep.
+
+### `POST /_test/evm_gas`
+
+`{}` reads `{"baseFeePerGas":100000000}` by default. `{"baseFeePerGas":6767000000}` sets the HyperEVM small-block base fee in wei that `eth_gasPrice` reports and `sendToEvmWithData` charges; zero is refused with HTTP400. Reset restores the default.
+
+### `POST /evm`
+
+A JSON-RPC endpoint answering only `eth_gasPrice`, as hex wei. Any other method is error `-32601`; a body that is not a JSON-RPC object is error `-32700` with a null id. Batches are not supported.
 
 ### `POST /_test/fees`
 

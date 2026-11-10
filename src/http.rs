@@ -2,9 +2,9 @@
 //! handlers, and the router.
 
 use crate::{
-    actor::{Actor, Admission, Request, exchange_error, text},
-    crypto,
-    wire::{Control, Envelope, InfoRequest, Object},
+    actor::{Actor, Admission, Request, exchange_error, json_response, text},
+    crypto, evm,
+    wire::{Control, Envelope, EvmCall, InfoRequest, Object},
 };
 use axum::{
     Router,
@@ -23,6 +23,7 @@ pub fn router(actor: Actor) -> Router {
     Router::new()
         .route("/info", post(info))
         .route("/exchange", post(exchange))
+        .route("/evm", post(evm))
         .route("/_test/{control}", post(control))
         .with_state(actor)
 }
@@ -133,6 +134,18 @@ async fn exchange(
         .await
 }
 
+async fn evm(
+    admission: Admission,
+    State(actor): State<Actor>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
+    match parse_body::<Object<EvmCall>>(&headers, &bytes) {
+        Ok(Object(call)) => actor.call(admission, Request::Evm(call)).await,
+        Err(_) => json_response(Bytes::from(evm::unparsable().to_string())),
+    }
+}
+
 async fn control(
     admission: Admission,
     State(actor): State<Actor>,
@@ -158,6 +171,7 @@ async fn control(
         "fund" => parse(&headers, &bytes, Control::Fund),
         "book" => parse(&headers, &bytes, Control::Book),
         "evm_sends" => parse(&headers, &bytes, |_: IgnoredAny| Control::EvmSends),
+        "evm_gas" => parse(&headers, &bytes, Control::EvmGas),
         _ => return text(400, "Simulator: unknown control endpoint"),
     };
     match control {

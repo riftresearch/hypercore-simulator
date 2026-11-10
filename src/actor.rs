@@ -4,7 +4,8 @@
 use crate::{
     engine::{Engine, ExchangeReply},
     error::Error,
-    wire::{Address, Control, Envelope, FaultKind, FaultSpec, Info, Rejection},
+    evm,
+    wire::{Address, Control, Envelope, EvmCall, FaultKind, FaultSpec, Info, Rejection},
 };
 use axum::{
     body::{Body, Bytes},
@@ -48,6 +49,7 @@ pub enum Request {
         control: Control,
         raw: Bytes,
     },
+    Evm(EvmCall),
 }
 
 pub struct Command {
@@ -240,6 +242,8 @@ impl Server {
                 Request::Control { control, raw } => {
                     self.control(control, &raw).map(|body| (body, None))
                 }
+                Request::Evm(call) => serialize(&evm::answer(&call, self.engine.evm_base_fee()))
+                    .map(|body| (body, None)),
             };
             // Enqueued work commits even if its caller no longer wants the reply.
             let _ = command.reply.send(Reply {

@@ -918,7 +918,8 @@ fn fills_by_time_are_inclusive_and_oldest_first() {
 }
 
 const T0: u64 = 1_789_883_000_000;
-const CANONICAL_USDC_ONLY: &str = r#"{"tokens":[{"index":0,"name":"USDC","tokenId":"0x1","szDecimals":8,"weiDecimals":8,"isCanonical":true}],"universe":[]}"#;
+const EVM_SENDER: &str = "0x31f3e6455222c5f2056bdd6007c80d00e6ae532b";
+const GAS_REFUSAL: &str = "Insufficient USDC or HYPE balance for token transfer gas.";
 
 fn send_to_evm(amount: &str, nonce: u64) -> Value {
     json!({
@@ -944,10 +945,28 @@ fn evm_sends(engine: &mut Engine, now: u64) -> Value {
     control(engine, Control::EvmSends, &json!({}), now).unwrap()
 }
 
+fn evm_gas(engine: &mut Engine, body: Value, now: u64) -> Result<Value> {
+    let gas = serde_json::from_value(body.clone()).unwrap();
+    control(engine, Control::EvmGas(gas), &body, now)
+}
+
+fn priced_hype(price: &str) -> Engine {
+    let mut engine = Engine::new(MAINNET_SPOT_META).unwrap();
+    let mark = json!({"coin": "@107", "markPx": price});
+    control(
+        &mut engine,
+        Control::Book(serde_json::from_value(mark.clone()).unwrap()),
+        &mark,
+        T0,
+    )
+    .unwrap();
+    engine
+}
+
 #[test]
-fn an_evm_withdrawal_without_hype_pays_gas_in_usdc_on_top_of_the_amount() {
-    let mut engine = Engine::new(CANONICAL_USDC_ONLY).unwrap();
-    let sender = "0x31f3e6455222c5f2056bdd6007c80d00e6ae532b";
+fn an_evm_withdrawal_without_hype_pays_the_gas_in_usdc_at_the_hype_price() {
+    let mut engine = priced_hype("73.416");
+    let sender = EVM_SENDER;
     fund(
         &mut engine,
         json!({"address":sender,"token":"USDC","amount":"2","mode":"transfer"}),
@@ -961,10 +980,7 @@ fn an_evm_withdrawal_without_hype_pays_gas_in_usdc_on_top_of_the_amount() {
         sender,
         T0 + 1,
     );
-    assert_eq!(
-        refused,
-        json!({"status":"err","response":"Insufficient USDC or HYPE balance for token transfer gas."})
-    );
+    assert_eq!(refused, json!({"status":"err","response":GAS_REFUSAL}));
     assert_eq!(evm_sends(&mut engine, T0 + 1), json!([]));
 
     let sent = exchange(
@@ -975,7 +991,7 @@ fn an_evm_withdrawal_without_hype_pays_gas_in_usdc_on_top_of_the_amount() {
     );
     assert_eq!(sent, json!({"status":"ok","response":{"type":"default"}}));
     let state = account(&mut engine, sender, T0 + 2);
-    assert_eq!(state["state"]["balances"][0]["total"], "0.098178");
+    assert_eq!(state["state"]["balances"][0]["total"], "0.098532");
     let ledger = state["ledger"].as_array().unwrap();
     let delta = &ledger.last().unwrap()["delta"];
     assert_eq!(delta["type"], "send");
@@ -984,7 +1000,7 @@ fn an_evm_withdrawal_without_hype_pays_gas_in_usdc_on_top_of_the_amount() {
         "0x2000000000000000000000000000000000000000"
     );
     assert_eq!(delta["amount"], "1.9");
-    assert_eq!(delta["fee"], "0.001822");
+    assert_eq!(delta["fee"], "0.001468");
     assert_eq!(delta["feeToken"], "USDC");
     assert_eq!(delta["nativeTokenFee"], "0.0");
     assert_eq!(delta["nonce"], 1_789_883_399_641_u64);
@@ -1040,11 +1056,11 @@ fn an_evm_withdrawal_pays_gas_in_hype_when_the_account_holds_it() {
             .unwrap_or(Value::Null)
     };
     assert_eq!(total("USDC"), "0.0");
-    assert_eq!(total("HYPE"), "0.00097899");
+    assert_eq!(total("HYPE"), "0.00098");
     let delta = &state["ledger"].as_array().unwrap().last().unwrap()["delta"];
     assert_eq!(delta["fee"], "0.0");
     assert_eq!(delta["feeToken"], "");
-    assert_eq!(delta["nativeTokenFee"], "0.00002101");
+    assert_eq!(delta["nativeTokenFee"], "0.00002");
 
     let unsupported = exchange(
         &mut engine,
@@ -1071,4 +1087,106 @@ fn an_evm_withdrawal_pays_gas_in_hype_when_the_account_holds_it() {
     assert_eq!(unsupported["status"], "err");
     control(&mut engine, Control::Reset, &json!({}), T0 + 3).unwrap();
     assert_eq!(evm_sends(&mut engine, T0 + 3), json!([]));
+}
+
+#[test]
+fn a_base_fee_spike_charges_more_usdc_than_a_two_cent_reserve_covers() {
+    let mut engine = priced_hype("73.416");
+    fund(
+        &mut engine,
+        json!({"address":EVM_SENDER,"token":"USDC","amount":"69327.48603558","mode":"transfer"}),
+        T0,
+    )
+    .unwrap();
+    assert_eq!(
+        evm_gas(&mut engine, json!({"baseFeePerGas": 6_767_000_000_u64}), T0).unwrap(),
+        json!({"baseFeePerGas": 6_767_000_000_u64})
+    );
+
+    let reserved = exchange(
+        &mut engine,
+        send_to_evm("69327.466035", 1_789_883_381_543),
+        EVM_SENDER,
+        T0 + 1,
+    );
+    assert_eq!(reserved, json!({"status":"err","response":GAS_REFUSAL}));
+
+    let sent = exchange(
+        &mut engine,
+        send_to_evm("69327.38", 1_789_883_399_641),
+        EVM_SENDER,
+        T0 + 2,
+    );
+    assert_eq!(sent, json!({"status":"ok","response":{"type":"default"}}));
+    let state = account(&mut engine, EVM_SENDER, T0 + 2);
+    assert_eq!(
+        state["ledger"].as_array().unwrap().last().unwrap()["delta"]["fee"],
+        "0.099361"
+    );
+    assert_eq!(state["state"]["balances"][0]["total"], "0.00667458");
+}
+
+#[test]
+fn usdc_gas_needs_a_hype_price() {
+    let mut engine = Engine::new(MAINNET_SPOT_META).unwrap();
+    fund(
+        &mut engine,
+        json!({"address":EVM_SENDER,"token":"USDC","amount":"2","mode":"transfer"}),
+        T0,
+    )
+    .unwrap();
+    let refused = exchange(
+        &mut engine,
+        send_to_evm("1", 1_789_883_381_543),
+        EVM_SENDER,
+        T0 + 1,
+    );
+    assert_eq!(
+        refused["response"],
+        "Simulator: no HYPE/USDC price to charge EVM gas in USDC"
+    );
+}
+
+#[test]
+fn gas_too_small_to_charge_in_hype_never_draws_on_hype() {
+    let mut engine = priced_hype("73.416");
+    fund(
+        &mut engine,
+        json!({"address":EVM_SENDER,"token":"USDC","amount":"2","mode":"transfer"}),
+        T0,
+    )
+    .unwrap();
+    evm_gas(&mut engine, json!({"baseFeePerGas": 1}), T0).unwrap();
+    let sent = exchange(
+        &mut engine,
+        send_to_evm("1", 1_789_883_381_543),
+        EVM_SENDER,
+        T0 + 1,
+    );
+    assert_eq!(sent, json!({"status":"ok","response":{"type":"default"}}));
+    let state = account(&mut engine, EVM_SENDER, T0 + 1);
+    let delta = &state["ledger"].as_array().unwrap().last().unwrap()["delta"];
+    assert_eq!(delta["fee"], "0.0");
+    assert_eq!(delta["nativeTokenFee"], "0.0");
+    assert_eq!(state["state"]["balances"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn the_evm_gas_control_sets_a_positive_base_fee_until_reset() {
+    let mut engine = Engine::new(MAINNET_SPOT_META).unwrap();
+    let default = json!({"baseFeePerGas": DEFAULT_EVM_BASE_FEE});
+    assert_eq!(evm_gas(&mut engine, json!({}), T0).unwrap(), default);
+    assert_eq!(
+        evm_gas(
+            &mut engine,
+            json!({"baseFeePerGas": 112_344_000_000_u64}),
+            T0
+        )
+        .unwrap(),
+        json!({"baseFeePerGas": 112_344_000_000_u64})
+    );
+    assert!(evm_gas(&mut engine, json!({"baseFeePerGas": 0}), T0).is_err());
+    assert_eq!(engine.evm_base_fee(), 112_344_000_000);
+    control(&mut engine, Control::Reset, &json!({}), T0).unwrap();
+    assert_eq!(evm_gas(&mut engine, json!({}), T0).unwrap(), default);
 }

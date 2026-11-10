@@ -11,10 +11,11 @@ The simulator serves `POST /info` and `POST /exchange` with the same request sha
 | Surface | Supported |
 | --- | --- |
 | `/info` | `spotMeta`, `l2Book` (with `nSigFigs`/`mantissa` aggregation), `spotClearinghouseState`, `clearinghouseState` (an empty perp state at the simulator clock), `preTransferCheck`, `userRole`, `userFees`, `orderStatus`, `openOrders`, `frontendOpenOrders`, `historicalOrders`, `userFills` and `userFillsByTime` (with `aggregateByTime`), `userNonFundingLedgerUpdates` |
-| `/exchange` | `order` (spot limit `Ioc`, `Gtc`, `Alo` and stop/take-profit triggers), `cancel`, `cancelByCloid`, `modify`, `batchModify`, `scheduleCancel`, and `sendAsset` (spot to spot), with real EIP-712 / MessagePack signature recovery compatible with the official Python SDK |
+| `/exchange` | `order` (spot limit `Ioc`, `Gtc`, `Alo` and stop/take-profit triggers), `cancel`, `cancelByCloid`, `modify`, `batchModify`, `scheduleCancel`, `sendAsset` (spot to spot) and `sendToEvmWithData` (spot USDC to an external EVM chain, charged HyperEVM gas), with real EIP-712 / MessagePack signature recovery compatible with the official Python SDK |
+| `/evm` | `eth_gasPrice`, the HyperEVM small-block base fee that withdrawal gas is charged at |
 | Accounting | balances and holds, USD cost basis, activation fees for fresh accounts, taker and maker fees with VIP tiers and rolling volume, nonce windows and replay protection, automatic dust conversion |
 | Matching | price-time priority per market; users' resting orders and injected synthetic depth share the book, so accounts can build a real book with `Gtc`/`Alo` orders and trade against each other with maker and taker fills |
-| Test controls | `/_test/fund`, `/_test/book`, `/_test/time`, `/_test/fees`, `/_test/dust`, `/_test/fault`, `/_test/upgrade`, `/_test/account`, `/_test/reset` to seed and inspect state |
+| Test controls | `/_test/fund`, `/_test/book`, `/_test/time`, `/_test/fees`, `/_test/dust`, `/_test/fault`, `/_test/upgrade`, `/_test/account`, `/_test/evm_gas`, `/_test/evm_sends`, `/_test/reset` to seed and inspect state |
 
 State is in memory. A fixed clock, deterministic ids and a bounded single-writer core make runs reproducible, and the server sustains around 20,000 filled orders per second on loopback.
 
@@ -49,10 +50,10 @@ curl -s localhost:3000/info -H 'content-type: application/json' \
 
 ## Limitations
 
-- **Spot only.** No perpetuals, websockets, bridge, withdrawals, vaults or sub-accounts.
+- **Spot only.** No perpetuals, websockets, bridge deposits, vaults or sub-accounts. The only withdrawal is `sendToEvmWithData` of spot USDC, recorded for `/_test/evm_sends` rather than delivered anywhere.
 - **Only IOC behavior is measured.** Resting orders, post-only rejection, maker fees, self-trade prevention, cancels, modifies, triggers and scheduled cancels follow the public documentation and a matching loop recovered from the node binary, not testnet captures. Their error texts and edge cases are the simulator's best reading until a signed testnet campaign measures them; the semantics doc marks the whole section as unmeasured.
 - **No market activity of its own.** Nothing trades unless a client does. Synthetic depth from `/_test/book` sits still, and there is no price drift; to simulate a moving market, re-post `/_test/book` or run accounts that quote.
-- **The evidence is testnet.** Mainnet mode uses the mainnet signing domain, mainnet metadata and the documented daily dust policy, but no mainnet behavior has been probed and no mainnet parity is claimed.
+- **The evidence is testnet.** Mainnet mode uses the mainnet signing domain, mainnet metadata and the documented daily dust policy. The only mainnet measurement is the `sendToEvmWithData` gas charge; no other mainnet behavior has been probed and no mainnet parity is claimed.
 - **Generated identifiers are local.** Order ids, trade ids, transaction hashes and timestamps are deterministic simulator values, not chain identifiers.
 - **Some rules are assumptions.** Where testnet was not probed at a boundary (VIP cutoff equality, exact nonce window endpoints, testnet's dust cap) the semantics doc labels the choice; see its *Unverified compatibility* section.
 - **The test controls are unauthenticated.** Bind to loopback unless the network is trusted.

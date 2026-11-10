@@ -20,6 +20,7 @@ pub mod crypto;
 pub mod decimal;
 pub mod engine;
 pub mod error;
+pub mod evm;
 pub mod fees;
 pub mod http;
 pub mod wire;
