@@ -54,6 +54,7 @@ Send JSON objects to `POST /info`; captured positional array forms are also supp
 | `userNonFundingLedgerUpdates` | `user`, optional `startTime`, `endTime` | Inclusive millisecond range, defaults to 0/current clock; up to 500 matching entries, oldest first. |
 | `userFees` | `user` | External fee schedule/discounts and global exchange volume, with engine-computed per-user daily volume and rolling tier selection. See fees below; the baseline undiscounted spot taker rate is `0.0007`. |
 | `userRole` | `user` | `{"role":"user"}` for an existing account, otherwise `{"role":"missing"}`. |
+| `referral` | `user` | **Unmeasured simulator policy**, shape copied from live mainnet replies (2026-11-24): `referredBy` (`{referrer, code}` once the account entered a code with `setReferrer`, else `null`), `cumVlm` (the account's lifetime traded USDC notional), `unclaimedRewards`/`claimedRewards`/`builderRewards` `"0.0"`, `referrerState` (`{"stage":"ready","data":{"code","nReferrals","referralStates":[]}}` for the owner of a code registered with `/_test/referral`, else `{"stage":"needToTrade","data":{"required":"10000.0"}}`), `rewardHistory:[]`, and `tokenToState` (`[[0,{cumVlm,…}]]` once the account has volume, else `[]`, as live for an address with none). Referral rewards are not accrued. |
 
 Malformed argument shapes and unknown string query types return HTTP 422 with exact body `Failed to deserialize the JSON body into the target type`. The HTTP layer separately handles invalid JSON/content type. Numeric book aggregation values outside the captured supported set return HTTP 500 with body `null`: `nSigFigs` permits 2–5 or null; an explicit `mantissa` permits 2 or 5 only with `nSigFigs:5`. The official documentation also lists mantissa 1, but captured testnet rejects it, so capture evidence wins. Wrong JSON types still return 422.
 
@@ -129,6 +130,22 @@ Stable quote-to-quote pairs receive fee weight0.2. Explicit **AQAv1** alignment 
 
 USDC-quoted fills contribute `2 × trunc2(gross quote notional × volume weight)` to UTC-day taker volume, truncating per fill before doubling. Native LMA/USDEEE and KRWIN/USDYP contribute zero despite ordinary fees and USD cost-basis changes. USDC control markets with50%/100% deployer fee shares still contribute full volume, ruling out deployer share as the cause. The implementation qualifies USDC and explicitly configured AQAv1 quotes; undocumented eligibility of other quote regimes remains external context. `userFees` reports today plus14 preceding dates; tiers use14 completed days, not today's activity or donor-user history. Exact VIP cutoff equality remains an unmeasured strict-`>` assumption.
 
+Referral discounts apply to takers only. An account without a referrer gets the fee document's own `activeReferralDiscount`; an account that entered a code with `setReferrer` gets the schedule's `referralDiscount` (`0.04` in the bundled document) while its lifetime volume is under $25M, the cap the public referral docs state, and `userFees` then reports that discount as `activeReferralDiscount`. **Unmeasured simulator policy**: live mainnet fills agree with a 4% taker discount (6.72 bps against 7, and 1.344 against 1.40 on a stable pair), but the cap boundary and whether makers share it are not probed.
+
+### `setReferrer`
+
+**Unmeasured simulator policy; no capture exists yet.** `{"type":"setReferrer","code"}` is an L1 action, signed with the phantom Agent over the SDK's `{type, code}` MessagePack exactly as `Exchange.set_referrer` does (the recovery test vector was signed by the official SDK's `sign_l1_action`). It goes through the same admission as other L1 actions: a missing account is refused with `User or API Wallet {signer} does not exist.`, and the nonce is admitted before execution. Execution checks, in this order: an account that already has a referrer is refused with `Referrer already set.`; a code no one registered with `/_test/referral` is refused with `Referral code does not exist.` (codes are case-sensitive); the code's own owner is refused with `Cannot refer yourself.`. Otherwise the account records the code and its owner and answers `{"status":"ok","response":{"type":"default"}}`. These texts and their order are the simulator's, not Hyperliquid's.
+
+### Explorer
+
+**Unmeasured simulator policy**, with shapes copied from live mainnet replies (2026-11-24). `POST /explorer` serves the block explorer's queries on the same host as `/info`; Hyperliquid serves them at `rpc.hyperliquid.xyz/explorer`.
+
+- `{"type":"userDetails","user"}` answers `{"type":"userDetails","txs":[…]}`, newest first, each `{time, user, action, block, hash, error}`. `action` is the submitted action JSON, verbatim. An unknown user has `txs:[]`, as live.
+- `{"type":"txDetails","hash"}` answers `{"type":"txDetails","tx":{…}}`, or `{"type":"error","message":"Simulator: unknown transaction hash"}` with HTTP 200 for a hash no action has (live answers that shape with its own message).
+- A malformed body or unknown `type` is HTTP 422 `Failed to deserialize the JSON body into the target type`, as live.
+
+Every exchange action that passes admission (vault, nonce, account and expiry checks) is listed, whatever its execution did: `error` is the action's own refusal text, or `null`. Live mainnet likewise lists a refused `registerReferrer` with its hash and refusal text. Actions refused at admission are not listed. `block` counts listed actions from 1 and `hash` is the simulator's deterministic transaction hash of the request bytes and nonce, so a `sendAsset`'s explorer hash equals its ledger hash, while an order's does not equal its fills' per-order hashes. How many transactions live keeps per user is unmeasured; the simulator lists them all.
+
 ### Automatic spot dust conversion
 
 Testnet captures show sub-lot balances converting at UTC minute boundaries, including individual balances worth more than $1. This differs from [HIP-1's documented mainnet policy](https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-1-native-token-standard): midnight UTC and at most $1 per eligible balance. Mainnet has not been probed. Testnet's exact cap remains unmeasured; the default imposes no invented $1 cap and reports that provenance through `/_test/dust`.
@@ -181,6 +198,10 @@ Optional positive `markPx` updates the current reference independently of book m
 ```
 
 Returns existence, normalized address, `userHasSentTx`, serialization mode, ordinary balance `state`, admitted `nonces`, fills, ledger, order map, and cloid map. Missing accounts return only address and `exists:false`.
+
+### `POST /_test/referral`
+
+`{"address":"0x…","code":"RIFTHQ"}` registers `code` as a referral code owned by `address`, as Hyperliquid's `registerReferrer` does once an account has traded $10,000; the simulator does not require the volume. Registering a code again for its owner is a no-op; an empty code or one owned by another address is refused with HTTP 400. Reset clears every registration. Answers `{"ok":true}`.
 
 ### `POST /_test/reset`
 

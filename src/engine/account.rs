@@ -59,6 +59,27 @@ pub struct Account {
     /// Lifetime USDC notional traded, gating `scheduleCancel`.
     pub lifetime_volume: Decimal,
     pub scheduled_cancel: ScheduledCancel,
+    /// The referral code this account entered with `setReferrer`, and its owner.
+    pub referrer: Option<Referrer>,
+    /// Every action that reached a block, oldest first, for the explorer.
+    pub txs: Vec<Tx>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Referrer {
+    pub code: String,
+    pub owner: Address,
+}
+
+/// An action as the block explorer lists it. `action` is the submitted JSON,
+/// verbatim; `error` is the action's own refusal, if it was refused.
+#[derive(Debug)]
+pub struct Tx {
+    pub time: u64,
+    pub action: Box<serde_json::value::RawValue>,
+    pub block: u64,
+    pub hash: TxHash,
+    pub error: Option<crate::error::Error>,
 }
 
 impl Account {

@@ -4,7 +4,7 @@
 use crate::{
     actor::{Actor, Admission, Request, exchange_error, json_response, text},
     crypto, evm,
-    wire::{Control, Envelope, EvmCall, InfoRequest, Object},
+    wire::{Control, Envelope, EvmCall, ExplorerQuery, InfoRequest, Object},
 };
 use axum::{
     Router,
@@ -24,6 +24,7 @@ pub fn router(actor: Actor) -> Router {
         .route("/info", post(info))
         .route("/exchange", post(exchange))
         .route("/evm", post(evm))
+        .route("/explorer", post(explorer))
         .route("/_test/{control}", post(control))
         .with_state(actor)
 }
@@ -102,6 +103,18 @@ async fn info(
     }
 }
 
+async fn explorer(
+    admission: Admission,
+    State(actor): State<Actor>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
+    match parse_body::<ExplorerQuery>(&headers, &bytes) {
+        Ok(query) => actor.call(admission, Request::Explorer(query)).await,
+        Err(error) => error.upstream(),
+    }
+}
+
 async fn exchange(
     admission: Admission,
     State(actor): State<Actor>,
@@ -172,6 +185,7 @@ async fn control(
         "book" => parse(&headers, &bytes, Control::Book),
         "evm_sends" => parse(&headers, &bytes, |_: IgnoredAny| Control::EvmSends),
         "evm_gas" => parse(&headers, &bytes, Control::EvmGas),
+        "referral" => parse(&headers, &bytes, Control::Referral),
         _ => return text(400, "Simulator: unknown control endpoint"),
     };
     match control {

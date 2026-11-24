@@ -5,7 +5,9 @@ use crate::{
     engine::{Engine, ExchangeReply},
     error::Error,
     evm,
-    wire::{Address, Control, Envelope, EvmCall, FaultKind, FaultSpec, Info, Rejection},
+    wire::{
+        Address, Control, Envelope, EvmCall, ExplorerQuery, FaultKind, FaultSpec, Info, Rejection,
+    },
 };
 use axum::{
     body::{Body, Bytes},
@@ -37,6 +39,7 @@ pub struct Admission {
 
 pub enum Request {
     Info(Info),
+    Explorer(ExplorerQuery),
     /// The raw body seeds the deterministic transaction hash. The signer is
     /// recovered on the HTTP worker; the state thread only sequences it after
     /// injected faults, exactly as before.
@@ -234,6 +237,7 @@ impl Server {
         while let Some(command) = receiver.blocking_recv() {
             let result = match command.request {
                 Request::Info(query) => self.info(&query).map(|body| (body, None)),
+                Request::Explorer(query) => self.explorer(&query).map(|body| (body, None)),
                 Request::Exchange {
                     envelope,
                     raw,
@@ -282,6 +286,12 @@ impl Server {
             )),
             Err(Rejection::Null) => Err(Failure::JsonText(500, "null".into())),
         }
+    }
+
+    fn explorer(&mut self, query: &ExplorerQuery) -> Result<Bytes, Failure> {
+        self.advance()
+            .map_err(|error| Failure::Text(500, error.into()))?;
+        serialize(&self.engine.explorer(query))
     }
 
     fn exchange(

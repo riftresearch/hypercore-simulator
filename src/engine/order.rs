@@ -326,6 +326,7 @@ impl Engine {
         let rate = self.fees.spot_taker_rate(
             account.map(|a| &a.daily_volume),
             account.map(|a| &a.daily_add_volume),
+            self.referral_discount(account),
             now_ms,
         )?;
         mul(rate, market.fee_weight)?

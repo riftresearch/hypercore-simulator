@@ -12,7 +12,7 @@ use chrono::{DateTime, Days, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 const DAY_MS: u64 = 86_400_000;
 
@@ -30,6 +30,7 @@ const REPLACED: [&str; 5] = [
 struct Rates {
     /// Wire text of cross, add, spotCross and spotAdd after the staking discount.
     user: [String; 4],
+    /// After the staking discount; the account's referral discount applies on top.
     spot_taker: Decimal,
     spot_maker: Decimal,
 }
@@ -47,6 +48,10 @@ pub struct FeeState {
     base: Rates,
     system_spot_taker: Decimal,
     vip: Vec<VipTier>,
+    /// The document's `activeReferralDiscount`, for accounts without a referrer.
+    unreferred_discount: Decimal,
+    /// The schedule's `referralDiscount`, for accounts that entered a code.
+    referral_discount: Decimal,
 }
 
 fn nonnegative<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
@@ -187,13 +192,13 @@ struct StakingRow {
 }
 
 impl Rates {
-    fn new(row: &RateRow, staking: Decimal, referral: Decimal) -> Result<Self> {
+    fn new(row: &RateRow, staking: Decimal) -> Result<Self> {
         let mut values = [row.cross, row.add, row.spot_cross, row.spot_add];
         for value in &mut values {
             *value = mul(*value, staking)?;
         }
         Ok(Self {
-            spot_taker: mul(values[2], referral)?,
+            spot_taker: values[2],
             spot_maker: values[3],
             user: values.map(wire),
         })
@@ -221,7 +226,6 @@ impl FeeState {
 
     fn build(source: Source, echo: Map<String, Value>) -> Result<Self> {
         let staking = add(ONE, -source.active_staking_discount.discount)?;
-        let referral = add(ONE, -source.active_referral_discount)?;
         let schedule = &source.fee_schedule;
         let mut vip = Vec::with_capacity(schedule.tiers.vip.len());
         for row in &schedule.tiers.vip {
@@ -233,7 +237,7 @@ impl FeeState {
             }
             vip.push(VipTier {
                 cutoff: row.ntl_cutoff,
-                rates: Rates::new(&row.rates, staking, referral)?,
+                rates: Rates::new(&row.rates, staking)?,
             });
         }
         let mut exchange = BTreeMap::new();
@@ -245,9 +249,11 @@ impl FeeState {
         Ok(Self {
             echo,
             exchange,
-            base: Rates::new(&schedule.rates, staking, referral)?,
+            base: Rates::new(&schedule.rates, staking)?,
             system_spot_taker: schedule.rates.spot_cross,
             vip,
+            unreferred_discount: source.active_referral_discount,
+            referral_discount: schedule.referral_discount,
         })
     }
 
@@ -281,10 +287,22 @@ impl FeeState {
             .map_or(&self.base, |tier| &tier.rates))
     }
 
+    /// The referral discount an account's taker fees get: the schedule's
+    /// `referralDiscount` once it has entered a code and while its volume is under
+    /// the cap, else the document's own `activeReferralDiscount`.
+    pub fn referral_discount(&self, referred: bool) -> Decimal {
+        if referred {
+            self.referral_discount
+        } else {
+            self.unreferred_discount
+        }
+    }
+
     pub fn response(
         &self,
         cross: Daily<'_>,
         add_volume: Daily<'_>,
+        referral: Decimal,
         now_ms: u64,
     ) -> Result<FeeResponse<'_>> {
         let (day, today) = Self::day(now_ms)?;
@@ -312,8 +330,15 @@ impl FeeState {
             });
         }
         let [cross, add, spot_cross, spot_add] = &rates.user;
+        let echo = if referral == self.unreferred_discount {
+            Cow::Borrowed(&self.echo)
+        } else {
+            let mut echo = self.echo.clone();
+            echo.insert("activeReferralDiscount".into(), wire(referral).into());
+            Cow::Owned(echo)
+        };
         Ok(FeeResponse {
-            echo: &self.echo,
+            echo,
             daily_user_vlm: rows,
             user_cross_rate: cross,
             user_add_rate: add,
@@ -326,14 +351,19 @@ impl FeeState {
         self.system_spot_taker
     }
 
+    /// The taker rate after the staking discount and the account's `referral` discount.
     pub fn spot_taker_rate(
         &self,
         cross: Daily<'_>,
         add_volume: Daily<'_>,
+        referral: Decimal,
         now_ms: u64,
     ) -> Result<Decimal> {
         let (day, _) = Self::day(now_ms)?;
-        Ok(self.rates(cross, add_volume, day)?.spot_taker)
+        mul(
+            self.rates(cross, add_volume, day)?.spot_taker,
+            add(ONE, -referral)?,
+        )
     }
 
     /// The maker rate after the staking discount; referral discounts apply to takers only.
@@ -352,7 +382,7 @@ impl FeeState {
 #[serde(rename_all = "camelCase")]
 pub struct FeeResponse<'a> {
     #[serde(flatten)]
-    echo: &'a Map<String, Value>,
+    echo: Cow<'a, Map<String, Value>>,
     daily_user_vlm: Vec<DayReport<'a>>,
     user_cross_rate: &'a str,
     user_add_rate: &'a str,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::wire::{Control, Envelope, Funding, Info, InfoRequest};
+use crate::wire::{Control, Envelope, ExplorerQuery, Funding, Info, InfoRequest};
 use serde_json::{Value, json};
 
 const USDC_ONLY: &str = r#"{"tokens":[{"index":0,"name":"USDC","tokenId":"0x1","szDecimals":8,"weiDecimals":8}],"universe":[]}"#;
@@ -1189,4 +1189,175 @@ fn the_evm_gas_control_sets_a_positive_base_fee_until_reset() {
     assert_eq!(engine.evm_base_fee(), 112_344_000_000);
     control(&mut engine, Control::Reset, &json!({}), T0).unwrap();
     assert_eq!(evm_gas(&mut engine, json!({}), T0).unwrap(), default);
+}
+
+// ---------------------------------------------------------------------------
+// Referrals and the explorer. Unmeasured simulator policy; see the semantics doc.
+
+const OUTSIDER: &str = "0x3333333333333333333333333333333333333333";
+
+fn register(engine: &mut Engine, address: &str, code: &str) -> Result<Value> {
+    let body = json!({"address": address, "code": code});
+    control(
+        engine,
+        Control::Referral(serde_json::from_value(body.clone()).unwrap()),
+        &body,
+        NOW,
+    )
+}
+
+fn set_referrer(engine: &mut Engine, signer: &str, nonce: u64, code: &str) -> Value {
+    submit(
+        engine,
+        signer,
+        nonce,
+        json!({"type":"setReferrer","code":code}),
+    )
+}
+
+fn refused(text: &str) -> Value {
+    json!({"status":"err","response":text})
+}
+
+#[test]
+fn a_referrer_is_set_once_from_a_registered_code_that_is_not_ones_own() {
+    let mut engine = Engine::new(NQ_MARKET).unwrap();
+    market(&mut engine);
+    register(&mut engine, MAKER, "RIFTHQ").unwrap();
+    assert!(register(&mut engine, TAKER, "RIFTHQ").is_err());
+    assert!(register(&mut engine, TAKER, "").is_err());
+
+    assert_eq!(
+        set_referrer(&mut engine, TAKER, NOW + 1, "rifthq"),
+        refused("Referral code does not exist.")
+    );
+    assert_eq!(
+        set_referrer(&mut engine, MAKER, NOW + 2, "RIFTHQ"),
+        refused("Cannot refer yourself.")
+    );
+    assert_eq!(
+        set_referrer(&mut engine, TAKER, NOW + 3, "RIFTHQ"),
+        json!({"status":"ok","response":{"type":"default"}})
+    );
+    assert_eq!(
+        set_referrer(&mut engine, TAKER, NOW + 4, "RIFTHQ"),
+        refused("Referrer already set.")
+    );
+    assert_eq!(
+        set_referrer(&mut engine, OUTSIDER, NOW + 5, "RIFTHQ"),
+        refused(&format!("User or API Wallet {OUTSIDER} does not exist."))
+    );
+
+    assert_eq!(
+        info(&engine, json!({"type":"referral","user":TAKER}), NOW),
+        json!({
+            "referredBy":{"referrer":MAKER,"code":"RIFTHQ"},
+            "cumVlm":"0.0","unclaimedRewards":"0.0","claimedRewards":"0.0","builderRewards":"0.0",
+            "referrerState":{"stage":"needToTrade","data":{"required":"10000.0"}},
+            "rewardHistory":[],"tokenToState":[]
+        })
+    );
+    assert_eq!(
+        info(&engine, json!({"type":"referral","user":MAKER}), NOW)["referrerState"],
+        json!({"stage":"ready","data":{"code":"RIFTHQ","nReferrals":1,"referralStates":[]}})
+    );
+    assert_eq!(
+        info(&engine, json!(["referral", OUTSIDER]), NOW)["referredBy"],
+        Value::Null
+    );
+    let discount = |user: &str| {
+        info(&engine, json!({"type":"userFees","user":user}), NOW)["activeReferralDiscount"].clone()
+    };
+    assert_eq!(discount(TAKER), "0.04");
+    assert_eq!(discount(MAKER), "0.0");
+
+    control(&mut engine, Control::Reset, &json!({}), NOW).unwrap();
+    assert_eq!(
+        info(&engine, json!({"type":"referral","user":MAKER}), NOW)["referrerState"]["stage"],
+        "needToTrade"
+    );
+}
+
+#[test]
+fn a_referred_taker_pays_four_percent_less_and_gains_volume() {
+    let sell_fee = |referred: bool| {
+        let mut engine = Engine::new(NQ_MARKET).unwrap();
+        market(&mut engine);
+        register(&mut engine, MAKER, "RIFTHQ").unwrap();
+        if referred {
+            set_referrer(&mut engine, TAKER, NOW + 1, "RIFTHQ");
+        }
+        orders(
+            &mut engine,
+            TAKER,
+            NOW + 2,
+            vec![order("Ioc", false, "0.9", "100")],
+        );
+        let fills = info(&engine, json!({"type":"userFills","user":TAKER}), NOW);
+        let fee: Decimal = fills[0]["fee"].as_str().unwrap().parse().unwrap();
+        let referral = info(&engine, json!({"type":"referral","user":TAKER}), NOW);
+        (fee, referral)
+    };
+    let (plain, _) = sell_fee(false);
+    let (discounted, referral) = sell_fee(true);
+    assert_eq!(plain, Decimal::new(63, 3), "90 USDC of proceeds at 7 bps");
+    assert_eq!(discounted, Decimal::new(6048, 5), "6.72 bps: 7 bps less 4%");
+    assert_eq!(referral["cumVlm"], "90.0");
+    assert_eq!(
+        referral["tokenToState"],
+        json!([[0,{"cumVlm":"90.0","unclaimedRewards":"0.0","claimedRewards":"0.0","builderRewards":"0.0"}]])
+    );
+}
+
+#[test]
+fn the_explorer_lists_sequenced_actions_newest_first_with_their_refusals() {
+    let mut engine = Engine::new(NQ_MARKET).unwrap();
+    market(&mut engine);
+    register(&mut engine, MAKER, "RIFTHQ").unwrap();
+    set_referrer(&mut engine, TAKER, NOW + 1, "NOPE");
+    set_referrer(&mut engine, TAKER, NOW + 2, "RIFTHQ");
+    // A replayed nonce is refused before sequencing and never reaches a block.
+    assert_eq!(
+        set_referrer(&mut engine, TAKER, NOW + 2, "RIFTHQ"),
+        refused(&format!("Invalid nonce: duplicate nonce {}", NOW + 2))
+    );
+    set_referrer(&mut engine, OUTSIDER, NOW + 3, "RIFTHQ");
+
+    let details = |user: &str| {
+        let body = json!({"type":"userDetails","user":user});
+        let query: ExplorerQuery = serde_json::from_value(body).unwrap();
+        serde_json::to_value(engine.explorer(&query)).unwrap()
+    };
+    let taker = details(TAKER);
+    assert_eq!(taker["type"], "userDetails");
+    let txs = taker["txs"].as_array().unwrap();
+    assert_eq!(txs.len(), 2);
+    assert_eq!(
+        txs[0]["action"],
+        json!({"type":"setReferrer","code":"RIFTHQ"})
+    );
+    assert_eq!(txs[0]["error"], Value::Null);
+    assert_eq!(txs[0]["user"], TAKER);
+    assert_eq!(txs[0]["time"], NOW);
+    assert_eq!(
+        txs[1]["action"],
+        json!({"type":"setReferrer","code":"NOPE"})
+    );
+    assert_eq!(txs[1]["error"], "Referral code does not exist.");
+    assert!(txs[0]["block"].as_u64() > txs[1]["block"].as_u64());
+    let hash = txs[0]["hash"].as_str().unwrap();
+    assert_eq!(hash.len(), 66);
+    assert_ne!(hash, txs[1]["hash"].as_str().unwrap());
+    assert_eq!(details(OUTSIDER), json!({"type":"userDetails","txs":[]}));
+
+    let lookup = |hash: &str| {
+        let body = json!({"type":"txDetails","hash":hash});
+        let query: ExplorerQuery = serde_json::from_value(body).unwrap();
+        serde_json::to_value(engine.explorer(&query)).unwrap()
+    };
+    assert_eq!(lookup(hash), json!({"type":"txDetails","tx":txs[0]}));
+    assert_eq!(
+        lookup(&format!("0x{}", "00".repeat(32))),
+        json!({"type":"error","message":"Simulator: unknown transaction hash"})
+    );
 }

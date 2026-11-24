@@ -16,9 +16,14 @@ use crate::{
     decimal::{self, ONE, ZERO, div, mul, wire},
     error::{Error, Result},
     fees::{FeeResponse, FeeState},
-    wire::{Action, Address, Cloid, Control, Envelope, Info, OrderLookup, Rejection, TxHash},
+    wire::{
+        Action, Address, Cloid, Control, Envelope, ExplorerQuery, Info, OrderLookup, Rejection,
+        SetReferrerAction, TxHash,
+    },
 };
-use account::{Account, LedgerEntry, OrderDetail, OrderRecord, OrderState, PairIndex, TokenIndex};
+use account::{
+    Account, LedgerEntry, OrderDetail, OrderRecord, OrderState, PairIndex, Referrer, TokenIndex, Tx,
+};
 use book::{Book, L2Book};
 use dust::{DustPolicy, DustReply};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -40,6 +45,9 @@ pub const TESTNET_SPOT_META: &str = include_str!("../../bundled/spotMeta-testnet
 const FEES: &str = include_str!("../../bundled/userFees-testnet.json");
 
 pub const DEFAULT_EVM_BASE_FEE: u64 = 100_000_000;
+
+/// Referral discounts apply to a user's first $25M of volume (public docs).
+const REFERRAL_DISCOUNT_VOLUME_CAP: Decimal = Decimal::from_parts(25_000_000, 0, 0, false, 0);
 
 pub struct Token {
     pub index: TokenIndex,
@@ -108,6 +116,10 @@ pub struct Engine {
     /// `/_test/evm_sends` control that a bridge mock drains.
     evm_sends: Vec<EvmSend>,
     evm_base_fee: u64,
+    /// Referral codes registered with `/_test/referral`, and their owners.
+    referral_codes: BTreeMap<String, Address>,
+    /// The explorer's block height of the last recorded action.
+    block: u64,
 }
 
 impl Engine {
@@ -180,6 +192,8 @@ impl Engine {
             next_tid: 1,
             evm_sends: Vec::new(),
             evm_base_fee: DEFAULT_EVM_BASE_FEE,
+            referral_codes: BTreeMap::new(),
+            block: 0,
         };
         engine.quote_tokens = engine.default_quote_tokens();
         Ok(engine)
@@ -209,6 +223,8 @@ impl Engine {
         self.fees = self.default_fees.clone();
         self.quote_tokens = self.default_quote_tokens();
         self.aligned_quote_tokens.clear();
+        self.referral_codes.clear();
+        self.block = 0;
     }
 
     pub fn evm_base_fee(&self) -> u64 {
@@ -346,9 +362,11 @@ impl Engine {
                 InfoReply::Fees(self.fees.response(
                     account.map(|a| &a.daily_volume),
                     account.map(|a| &a.daily_add_volume),
+                    self.referral_discount(account),
                     now_ms,
                 )?)
             }
+            Info::Referral { user } => InfoReply::Referral(self.referral(*user)),
             Info::OrderStatus { user, oid } => {
                 let account = account(user);
                 let oid = match oid {
@@ -458,6 +476,8 @@ impl Engine {
         })
     }
 
+    /// An action that passes admission reaches a block, so the explorer lists it,
+    /// with its own refusal text if its execution refused it.
     pub fn exchange(
         &mut self,
         envelope: &Envelope,
@@ -465,19 +485,19 @@ impl Engine {
         signer: Address,
         now_ms: u64,
     ) -> ExchangeReply {
-        match self.exchange_inner(envelope, raw, signer, now_ms) {
+        if let Err(error) = self.admit(envelope, signer, now_ms) {
+            return ExchangeReply::Err(error);
+        }
+        let result = self.execute(envelope, raw, signer, now_ms);
+        self.record_tx(envelope, raw, signer, now_ms, result.as_ref().err());
+        match result {
             Ok(response) => ExchangeReply::Ok(response),
             Err(error) => ExchangeReply::Err(error),
         }
     }
 
-    fn exchange_inner(
-        &mut self,
-        envelope: &Envelope,
-        raw: &[u8],
-        signer: Address,
-        now_ms: u64,
-    ) -> Result<ExchangeOk> {
+    /// The checks before an action is sequenced: vault, nonce, account, expiry.
+    fn admit(&mut self, envelope: &Envelope, signer: Address, now_ms: u64) -> Result<()> {
         if envelope.vault_address.is_some() {
             return Err("Vault may not perform this action.".into());
         }
@@ -505,6 +525,16 @@ impl Engine {
         {
             return Err("Action already expired".into());
         }
+        Ok(())
+    }
+
+    fn execute(
+        &mut self,
+        envelope: &Envelope,
+        raw: &[u8],
+        signer: Address,
+        now_ms: u64,
+    ) -> Result<ExchangeOk> {
         Ok(match &envelope.action {
             Action::Order(action) => ExchangeOk::Order {
                 data: OrderData {
@@ -542,7 +572,170 @@ impl Engine {
                 self.send_to_evm(action, signer, envelope.nonce, now_ms, raw)?;
                 ExchangeOk::Default
             }
+            Action::SetReferrer(action) => {
+                self.set_referrer(action, signer)?;
+                ExchangeOk::Default
+            }
         })
+    }
+
+    /// Simulator policy, not measured: the refusal texts and their order.
+    fn set_referrer(&mut self, action: &SetReferrerAction, signer: Address) -> Result<()> {
+        let account = self
+            .accounts
+            .get(&signer)
+            .ok_or("Simulator: missing signer")?;
+        if account.referrer.is_some() {
+            return Err("Referrer already set.".into());
+        }
+        let owner = *self
+            .referral_codes
+            .get(&action.code)
+            .ok_or("Referral code does not exist.")?;
+        if owner == signer {
+            return Err("Cannot refer yourself.".into());
+        }
+        let account = self
+            .accounts
+            .get_mut(&signer)
+            .ok_or("Simulator: missing signer")?;
+        account.referrer = Some(Referrer {
+            code: action.code.clone(),
+            owner,
+        });
+        Ok(())
+    }
+
+    /// The taker referral discount `account` gets now.
+    fn referral_discount(&self, account: Option<&Account>) -> Decimal {
+        self.fees.referral_discount(account.is_some_and(|account| {
+            account.referrer.is_some() && account.lifetime_volume < REFERRAL_DISCOUNT_VOLUME_CAP
+        }))
+    }
+
+    fn record_tx(
+        &mut self,
+        envelope: &Envelope,
+        raw: &[u8],
+        signer: Address,
+        now_ms: u64,
+        error: Option<&Error>,
+    ) {
+        #[derive(Deserialize)]
+        struct Submitted<'a> {
+            #[serde(borrow)]
+            action: &'a RawValue,
+        }
+        let Ok(submitted) = serde_json::from_slice::<Submitted<'_>>(raw) else {
+            return;
+        };
+        let Some(account) = self.accounts.get_mut(&signer) else {
+            return;
+        };
+        self.block += 1;
+        account.txs.push(Tx {
+            time: now_ms,
+            action: submitted.action.to_owned(),
+            block: self.block,
+            hash: tx_hash(raw, envelope.nonce),
+            error: error.cloned(),
+        });
+    }
+
+    fn referral(&self, user: Address) -> ReferralReply<'_> {
+        let account = self.accounts.get(&user);
+        let volume = account.map_or(ZERO, |account| account.lifetime_volume);
+        let owned = self
+            .referral_codes
+            .iter()
+            .find(|(_, owner)| **owner == user)
+            .map(|(code, _)| code.as_str());
+        ReferralReply {
+            referred_by: account
+                .and_then(|account| account.referrer.as_ref())
+                .map(|referrer| ReferredBy {
+                    referrer: referrer.owner,
+                    code: &referrer.code,
+                }),
+            cum_vlm: wire(volume),
+            unclaimed_rewards: "0.0",
+            claimed_rewards: "0.0",
+            builder_rewards: "0.0",
+            referrer_state: match owned {
+                Some(code) => ReferrerState::Ready {
+                    code,
+                    n_referrals: self
+                        .accounts
+                        .values()
+                        .filter(|account| {
+                            account
+                                .referrer
+                                .as_ref()
+                                .is_some_and(|referrer| referrer.owner == user)
+                        })
+                        .count(),
+                    referral_states: [],
+                },
+                None => ReferrerState::NeedToTrade {
+                    required: "10000.0",
+                },
+            },
+            reward_history: [],
+            token_to_state: (volume > ZERO)
+                .then(|| {
+                    (
+                        0,
+                        TokenState {
+                            cum_vlm: wire(volume),
+                            unclaimed_rewards: "0.0",
+                            claimed_rewards: "0.0",
+                            builder_rewards: "0.0",
+                        },
+                    )
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    pub fn explorer(&self, query: &ExplorerQuery) -> ExplorerReply<'_> {
+        fn view(user: Address, tx: &Tx) -> ExplorerTx<'_> {
+            ExplorerTx {
+                time: tx.time,
+                user,
+                action: &tx.action,
+                block: tx.block,
+                hash: tx.hash,
+                error: tx.error.as_ref(),
+            }
+        }
+        match query {
+            ExplorerQuery::UserDetails { user } => ExplorerReply::UserDetails {
+                txs: self
+                    .accounts
+                    .get(user)
+                    .into_iter()
+                    .flat_map(|account| account.txs.iter().rev())
+                    .map(|tx| view(*user, tx))
+                    .collect(),
+            },
+            ExplorerQuery::TxDetails { hash } => self
+                .accounts
+                .iter()
+                .find_map(|(user, account)| {
+                    account
+                        .txs
+                        .iter()
+                        .find(|tx| tx.hash == *hash)
+                        .map(|tx| view(*user, tx))
+                })
+                .map_or(
+                    ExplorerReply::Error {
+                        message: "Simulator: unknown transaction hash",
+                    },
+                    |tx| ExplorerReply::TxDetails { tx },
+                ),
+        }
     }
 
     /// Enforce the measured nonce window, replay protection and the sent flag.
@@ -677,6 +870,21 @@ impl Engine {
                     base_fee_per_gas: self.evm_base_fee,
                 }
             }
+            Control::Referral(registration) => {
+                if registration.code.is_empty() {
+                    return Err("Simulator: referral code must not be empty".into());
+                }
+                match self.referral_codes.get(&registration.code) {
+                    Some(owner) if *owner != registration.address => {
+                        return Err("Simulator: referral code is owned by another address".into());
+                    }
+                    _ => {
+                        self.referral_codes
+                            .insert(registration.code, registration.address);
+                    }
+                }
+                ControlReply::Ok { ok: true }
+            }
             Control::Fund(funding) => ControlReply::Fund(self.fund(&funding, raw, now_ms)?),
             Control::Book(spec) => ControlReply::Book(self.set_book(&spec, now_ms)?),
             Control::Time(_) | Control::Fault(_) => {
@@ -810,6 +1018,71 @@ pub enum InfoReply<'a> {
     Fills(Vec<&'a Fill>),
     Aggregated(Vec<Fill>),
     Ledger(Vec<&'a LedgerEntry>),
+    Referral(ReferralReply<'a>),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferralReply<'a> {
+    referred_by: Option<ReferredBy<'a>>,
+    cum_vlm: String,
+    unclaimed_rewards: &'static str,
+    claimed_rewards: &'static str,
+    builder_rewards: &'static str,
+    referrer_state: ReferrerState<'a>,
+    reward_history: [(); 0],
+    token_to_state: Vec<(u64, TokenState)>,
+}
+
+#[derive(Serialize)]
+pub struct ReferredBy<'a> {
+    referrer: Address,
+    code: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(
+    tag = "stage",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum ReferrerState<'a> {
+    Ready {
+        code: &'a str,
+        n_referrals: usize,
+        referral_states: [(); 0],
+    },
+    NeedToTrade {
+        required: &'static str,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenState {
+    cum_vlm: String,
+    unclaimed_rewards: &'static str,
+    claimed_rewards: &'static str,
+    builder_rewards: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ExplorerReply<'a> {
+    UserDetails { txs: Vec<ExplorerTx<'a>> },
+    TxDetails { tx: ExplorerTx<'a> },
+    Error { message: &'static str },
+}
+
+#[derive(Serialize)]
+pub struct ExplorerTx<'a> {
+    time: u64,
+    user: Address,
+    action: &'a RawValue,
+    block: u64,
+    hash: TxHash,
+    error: Option<&'a Error>,
 }
 
 #[derive(Serialize)]

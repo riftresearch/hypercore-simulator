@@ -283,6 +283,9 @@ pub enum Info {
         #[serde(default, deserialize_with = "some")]
         aggregate_by_time: Option<bool>,
     },
+    /// Unmeasured: shape copied from a live mainnet reply; see the semantics doc.
+    #[serde(rename = "referral")]
+    Referral { user: Address },
     #[serde(rename = "userNonFundingLedgerUpdates", rename_all = "camelCase")]
     LedgerUpdates {
         user: Address,
@@ -354,7 +357,8 @@ fn positional(items: Vec<Value>) -> Result<Info> {
         | "userFees"
         | "openOrders"
         | "frontendOpenOrders"
-        | "historicalOrders" => (&["user"], 1),
+        | "historicalOrders"
+        | "referral" => (&["user"], 1),
         "orderStatus" => (&["user", "oid"], 2),
         "userFills" => (&["user", "aggregateByTime"], 1),
         "userFillsByTime" => (&["user", "startTime", "endTime", "aggregateByTime"], 2),
@@ -381,6 +385,20 @@ pub enum Rejection {
     Unprocessable,
     /// 500 with a JSON `null` body.
     Null,
+}
+
+// ---------------------------------------------------------------------------
+// /explorer
+
+/// The block explorer's queries, served on the same host as `/info`. Unmeasured:
+/// shapes copied from live mainnet replies; see the semantics doc.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum ExplorerQuery {
+    #[serde(rename = "userDetails")]
+    UserDetails { user: Address },
+    #[serde(rename = "txDetails")]
+    TxDetails { hash: TxHash },
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +444,8 @@ pub enum Action {
     SendAsset(SendAsset),
     #[serde(rename = "sendToEvmWithData")]
     SendToEvmWithData(SendToEvmWithData),
+    #[serde(rename = "setReferrer")]
+    SetReferrer(SetReferrerAction),
 }
 
 impl Action {
@@ -437,6 +457,13 @@ impl Action {
             _ => None,
         }
     }
+}
+
+/// `{type: "setReferrer", code}`, signed as an L1 action like `order`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetReferrerAction {
+    pub code: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -640,6 +667,14 @@ pub enum Control {
     Book(BookSpec),
     EvmSends,
     EvmGas(EvmGas),
+    Referral(ReferralCode),
+}
+
+/// Registers `code` as a referral code owned by `address`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReferralCode {
+    pub address: Address,
+    pub code: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

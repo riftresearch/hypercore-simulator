@@ -1,6 +1,6 @@
 //! Hyperliquid signing modeled on the official Python SDK's `utils/signing.py`.
 //! L1 actions (`order`, `cancel`, `cancelByCloid`, `modify`, `batchModify`,
-//! `scheduleCancel`) use the phantom Agent; `sendAsset` and `sendToEvmWithData`
+//! `scheduleCancel`, `setReferrer`) use the phantom Agent; `sendAsset` and `sendToEvmWithData`
 //! are user-signed EIP-712.
 //! Errors describe local validation, not observed upstream error text/precedence.
 
@@ -97,6 +97,13 @@ struct SignedBatchModify<'a> {
 }
 
 #[derive(Serialize)]
+struct SignedSetReferrer<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    code: &'a str,
+}
+
+#[derive(Serialize)]
 struct SignedScheduleCancel {
     #[serde(rename = "type")]
     kind: &'static str,
@@ -132,6 +139,10 @@ fn pack(action: &Action) -> Result<Vec<u8>> {
         Action::ScheduleCancel(action) => rmp_serde::to_vec_named(&SignedScheduleCancel {
             kind: "scheduleCancel",
             time: action.time,
+        }),
+        Action::SetReferrer(action) => rmp_serde::to_vec_named(&SignedSetReferrer {
+            kind: "setReferrer",
+            code: &action.code,
         }),
         Action::SendAsset(_) => return Err("sendAsset is not an L1 action".into()),
         Action::SendToEvmWithData(_) => {
@@ -297,5 +308,18 @@ mod tests {
             recover_signer(&tampered, true).unwrap(),
             Address::parse("0xcD49bbAc6E85fdEB167EB7cA41A945d2b8758F6F").unwrap()
         );
+    }
+
+    /// Signed by the official Python SDK's `sign_l1_action` (as its
+    /// `Exchange.set_referrer` does) with Hardhat's public test key #0.
+    #[test]
+    fn a_set_referrer_signature_recovers_its_signer() {
+        let body = r#"{"action":{"type":"setReferrer","code":"RIFTHQ"},"nonce":1700000000000,"signature":{"r":"0x17478f01bdb0d6d1b5f4e835c4c763a31da9efeb9bf45262a3520d5636cfcfff","s":"0x6a32017a150de7d16c17e017e53d7b29ffc21532ea8ae04b692e4992f35ca8f","v":27}}"#;
+        let signer = Address::parse("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266").unwrap();
+        let envelope: Envelope = serde_json::from_str(body).unwrap();
+        assert_eq!(recover_signer(&envelope, true).unwrap(), signer);
+        assert_ne!(recover_signer(&envelope, false).unwrap(), signer);
+        let tampered: Envelope = serde_json::from_str(&body.replace("RIFTHQ", "RIFTHR")).unwrap();
+        assert_ne!(recover_signer(&tampered, true).unwrap(), signer);
     }
 }
